@@ -48,6 +48,7 @@ CHANNELS = [
     'place_kharkiv',
     'hs_kharkiv',
     'kharkiv_1654',
+    'qwuitetest',
 ]
 
 # ===== КЛЮЧЕВЫЕ СЛОВА =====
