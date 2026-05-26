@@ -93,7 +93,6 @@ KEYWORDS = [
 ]
 
 # ===== КОД =====
-# Используем файл сессии пользователя для чтения каналов
 user_client = TelegramClient('bot_session', API_ID, API_HASH)
 bot_client = TelegramClient('bot', API_ID, API_HASH)
 
@@ -106,7 +105,7 @@ async def main():
 
     @user_client.on(events.NewMessage(chats=CHANNELS))
     async def handler(event):
-        text = event.message.text or ''
+        text = event.message.text or event.message.caption or ''
         text_lower = text.lower()
 
         for keyword in KEYWORDS:
@@ -115,15 +114,27 @@ async def main():
                 channel_name = getattr(channel, 'title', 'Неизвестный канал')
                 channel_username = getattr(channel, 'username', '')
 
-                msg = (
+                header = (
                     f"📢 Новый пост из канала: {channel_name}\n"
                     f"🔗 @{channel_username}\n"
                     f"🔍 Найдено по слову: «{keyword}»\n"
                     f"{'─' * 30}\n"
-                    f"{text[:1000]}"
                 )
 
-                await bot_client.send_message(MY_CHAT_ID, msg)
+                # Если есть медиа (фото/видео) — пересылаем с подписью
+                if event.message.media:
+                    caption = header + text[:900]
+                    await bot_client.send_file(
+                        MY_CHAT_ID,
+                        file=event.message.media,
+                        caption=caption
+                    )
+                else:
+                    # Только текст
+                    await bot_client.send_message(
+                        MY_CHAT_ID,
+                        header + text[:1000]
+                    )
                 break
 
     print("👀 Слежу за каналами...")
