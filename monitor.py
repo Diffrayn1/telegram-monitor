@@ -121,16 +121,23 @@ async def main():
                     f"{'─' * 30}\n"
                 )
 
-                # Если есть медиа (фото/видео) — пересылаем с подписью
                 if event.message.media:
-                    caption = header + text[:900]
-                    await bot_client.send_file(
-                        MY_CHAT_ID,
-                        file=event.message.media,
-                        caption=caption
-                    )
+                    try:
+                        # Скачиваем медиа через user_client и отправляем через bot_client
+                        media_bytes = await user_client.download_media(event.message, bytes)
+                        caption = header + text[:900]
+                        await bot_client.send_file(
+                            MY_CHAT_ID,
+                            file=media_bytes,
+                            caption=caption
+                        )
+                    except Exception as e:
+                        # Если медиа не получилось — отправляем просто текст
+                        await bot_client.send_message(
+                            MY_CHAT_ID,
+                            header + text[:1000] + "\n\n⚠️ Медиа не удалось переслать"
+                        )
                 else:
-                    # Только текст
                     await bot_client.send_message(
                         MY_CHAT_ID,
                         header + text[:1000]
