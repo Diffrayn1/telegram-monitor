@@ -1,6 +1,8 @@
 import os
 import asyncio
+import io
 from telethon import TelegramClient, events
+from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
 
 # ===== ДАННЫЕ БЕРУТСЯ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ =====
 API_ID = int(os.environ['API_ID'])
@@ -121,27 +123,44 @@ async def main():
                     f"{'─' * 30}\n"
                 )
 
+                caption = header + text[:900]
+
                 if event.message.media:
                     try:
-                        # Скачиваем медиа через user_client и отправляем через bot_client
-                        media_bytes = await user_client.download_media(event.message, bytes)
-                        caption = header + text[:900]
+                        media = event.message.media
+
+                        # Определяем расширение файла
+                        if isinstance(media, MessageMediaPhoto):
+                            ext = '.jpg'
+                        elif isinstance(media, MessageMediaDocument):
+                            mime = media.document.mime_type or ''
+                            if 'video' in mime:
+                                ext = '.mp4'
+                            elif 'gif' in mime:
+                                ext = '.gif'
+                            elif 'image' in mime:
+                                ext = '.jpg'
+                            else:
+                                ext = '.jpg'
+                        else:
+                            ext = '.jpg'
+
+                        # Скачиваем в память
+                        buf = io.BytesIO()
+                        await user_client.download_media(event.message, buf)
+                        buf.seek(0)
+                        buf.name = f'media{ext}'
+
                         await bot_client.send_file(
                             MY_CHAT_ID,
-                            file=media_bytes,
+                            file=buf,
                             caption=caption
                         )
                     except Exception as e:
-                        # Если медиа не получилось — отправляем просто текст
-                        await bot_client.send_message(
-                            MY_CHAT_ID,
-                            header + text[:1000] + "\n\n⚠️ Медиа не удалось переслать"
-                        )
+                        print(f"Ошибка медиа: {e}")
+                        await bot_client.send_message(MY_CHAT_ID, caption)
                 else:
-                    await bot_client.send_message(
-                        MY_CHAT_ID,
-                        header + text[:1000]
-                    )
+                    await bot_client.send_message(MY_CHAT_ID, caption)
                 break
 
     print("👀 Слежу за каналами...")
