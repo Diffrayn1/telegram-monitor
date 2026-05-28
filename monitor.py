@@ -12,7 +12,7 @@ API_ID = int(os.environ['API_ID'])
 API_HASH = os.environ['API_HASH']
 BOT_TOKEN = os.environ['BOT_TOKEN']
 MY_CHAT_ID = int(os.environ['MY_CHAT_ID'])
-GEMINI_API_KEY = os.environ['GEMINI_API_KEY']
+GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '')
 
 CHANNELS = [
     'roganskayarespublika', 'ha_golovne', 'Vidklyuchenya_KHARKIV',
