@@ -1,13 +1,18 @@
 import os
 import asyncio
 import io
+import logging
+import httpx
 from telethon import TelegramClient, events
 from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
+
+logging.basicConfig(level=logging.INFO)
 
 API_ID = int(os.environ['API_ID'])
 API_HASH = os.environ['API_HASH']
 BOT_TOKEN = os.environ['BOT_TOKEN']
 MY_CHAT_ID = int(os.environ['MY_CHAT_ID'])
+GEMINI_API_KEY = os.environ['GEMINI_API_KEY']
 
 CHANNELS = [
     'roganskayarespublika', 'ha_golovne', 'Vidklyuchenya_KHARKIV',
@@ -20,6 +25,7 @@ CHANNELS = [
     'kharkivts', 'kharkiv_news_24', 'majestic_kh', 'kharkiv_misto_geroi',
     'napovestkeKh', 'jenya_zub_live_news', 'gwaramedia', 'nakipelovo',
     'place_kharkiv', 'hs_kharkiv', 'kharkiv_1654', 'qwuitetest',
+    'monitor1654', 'bayrep_kh',
 ]
 
 KEYWORDS = [
@@ -7959,66 +7965,147 @@ KEYWORDS = [
     'їжа основа',
 ]
 
-user_client = TelegramClient('bot_session', API_ID, API_HASH)
+AI_PROMPT = """Ти — фільтр новин для районного каналу Харкова.
+
+Визнач чи стосується цей пост КОНКРЕТНО одного з цих місць:
+- Вулиця Одеська та прилеглі вулиці
+- Слобідський район Харкова
+- Основянський район Харкова
+- Нові Доми (район Харкова)
+- Аеропорт Основа та прилеглий район
+- Комунальний ринок на Одеській
+- Проспект Байрона
+- Проспект Аерокосмічний / Гагаріна
+- Левада, Жихор
+- Горбані, Павленки, Федорці
+
+ПРАВИЛА:
+- Загальні новини Харкова БЕЗ конкретного району = НІ
+- Тривога/дрони/ракети БЕЗ конкретної вулиці = НІ
+- Зеленський, НАТО, інші міста = НІ
+- Відключення БЕЗ конкретного района = НІ
+- Конкретна вулиця або місце з мого списку = ТАК
+
+Відповідай ТІЛЬКИ: ТАК або НІ"""
+
+async def check_with_gemini(text):
+    try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+        payload = {
+            "contents": [{
+                "parts": [{
+                    "text": f"{AI_PROMPT}\n\nПост:\n{text[:500]}"
+                }]
+            }],
+            "generationConfig": {
+                "maxOutputTokens": 10,
+                "temperature": 0
+            }
+        }
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.post(url, json=payload)
+            data = response.json()
+            answer = data["candidates"][0]["content"]["parts"][0]["text"].strip().upper()
+            logging.info(f"Gemini відповідь: {answer}")
+            return "ТАК" in answer or "TAK" in answer or "YES" in answer
+    except Exception as e:
+        logging.error(f"Помилка Gemini: {e}")
+        return True
+
+user_client = TelegramClient(
+    'bot_session', API_ID, API_HASH,
+    connection_retries=10,
+    retry_delay=5,
+    auto_reconnect=True,
+)
 bot_client = TelegramClient('bot', API_ID, API_HASH)
+
+async def send_to_me(event, keyword, channel_name, channel_username):
+    text = event.message.text or event.message.caption or ''
+    header = (
+        f"📢 {channel_name}\n"
+        f"🔗 @{channel_username}\n"
+        f"🔍 «{keyword}»\n"
+        f"{'─' * 30}\n"
+    )
+    caption = header + text[:900]
+
+    if event.message.media:
+        try:
+            media = event.message.media
+            if isinstance(media, MessageMediaPhoto):
+                ext = '.jpg'
+            elif isinstance(media, MessageMediaDocument):
+                mime = media.document.mime_type or ''
+                if 'video' in mime:
+                    ext = '.mp4'
+                elif 'gif' in mime:
+                    ext = '.gif'
+                else:
+                    ext = '.jpg'
+            else:
+                ext = '.jpg'
+
+            buf = io.BytesIO()
+            await user_client.download_media(event.message, buf)
+            buf.seek(0)
+            buf.name = f'media{ext}'
+            await bot_client.send_file(MY_CHAT_ID, file=buf, caption=caption)
+            return
+        except Exception as e:
+            logging.error(f"Помилка медіа: {e}")
+
+    await bot_client.send_message(MY_CHAT_ID, caption)
+
+@user_client.on(events.NewMessage(chats=CHANNELS))
+async def handler(event):
+    try:
+        text = event.message.text or event.message.caption or ''
+        text_lower = text.lower()
+
+        if not text_lower.strip():
+            return
+
+        found_keyword = None
+        for keyword in KEYWORDS:
+            if keyword.lower() in text_lower:
+                found_keyword = keyword
+                break
+
+        if not found_keyword:
+            return
+
+        logging.info(f"Знайдено: {found_keyword}. Перевіряю через Gemini...")
+        is_relevant = await check_with_gemini(text)
+
+        if not is_relevant:
+            logging.info(f"Gemini відхилив — не про наш район")
+            return
+
+        channel = await event.get_chat()
+        channel_name = getattr(channel, 'title', 'Невідомий канал')
+        channel_username = getattr(channel, 'username', '')
+
+        logging.info(f"✅ Gemini підтвердив! Надсилаю з {channel_name}")
+        await send_to_me(event, found_keyword, channel_name, channel_username)
+
+    except Exception as e:
+        logging.error(f"Помилка: {e}")
 
 async def main():
     await user_client.start()
     await bot_client.start(bot_token=BOT_TOKEN)
-    print("✅ Бот запущен!")
+    print("✅ Бот запущен з Gemini AI фільтром!")
     print(f"📋 Слежу за {len(CHANNELS)} каналами")
     print(f"🔍 Мониторю {len(KEYWORDS)} ключевых слов")
-
-    @user_client.on(events.NewMessage(chats=CHANNELS))
-    async def handler(event):
-        text = event.message.text or event.message.caption or ''
-        text_lower = text.lower()
-
-        for keyword in KEYWORDS:
-            if keyword.lower() in text_lower:
-                channel = await event.get_chat()
-                channel_name = getattr(channel, 'title', 'Неизвестный канал')
-                channel_username = getattr(channel, 'username', '')
-
-                header = (
-                    f"📢 Новый пост из канала: {channel_name}\n"
-                    f"🔗 @{channel_username}\n"
-                    f"🔍 Найдено по слову: «{keyword}»\n"
-                    f"{'─' * 30}\n"
-                )
-
-                caption = header + text[:900]
-
-                if event.message.media:
-                    try:
-                        media = event.message.media
-                        if isinstance(media, MessageMediaPhoto):
-                            ext = '.jpg'
-                        elif isinstance(media, MessageMediaDocument):
-                            mime = media.document.mime_type or ''
-                            if 'video' in mime:
-                                ext = '.mp4'
-                            elif 'gif' in mime:
-                                ext = '.gif'
-                            else:
-                                ext = '.jpg'
-                        else:
-                            ext = '.jpg'
-
-                        buf = io.BytesIO()
-                        await user_client.download_media(event.message, buf)
-                        buf.seek(0)
-                        buf.name = f'media{ext}'
-
-                        await bot_client.send_file(MY_CHAT_ID, file=buf, caption=caption)
-                    except Exception as e:
-                        print(f"Ошибка медиа: {e}")
-                        await bot_client.send_message(MY_CHAT_ID, caption)
-                else:
-                    await bot_client.send_message(MY_CHAT_ID, caption)
-                break
-
+    print("🤖 Gemini фільтр активний!")
     print("👀 Слежу за каналами...")
-    await user_client.run_until_disconnected()
+
+    while True:
+        try:
+            await user_client.run_until_disconnected()
+        except Exception as e:
+            logging.error(f"З'єднання перервано: {e}. Перепідключаємось...")
+            await asyncio.sleep(5)
 
 asyncio.run(main())
