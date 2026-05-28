@@ -7989,24 +7989,19 @@ AI_PROMPT = """Ти — фільтр новин для районного кан
 Відповідай ТІЛЬКИ: ТАК або НІ"""
 
 async def check_with_gemini(text):
+    if not GEMINI_API_KEY:
+        return True
     try:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
         payload = {
-            "contents": [{
-                "parts": [{
-                    "text": f"{AI_PROMPT}\n\nПост:\n{text[:500]}"
-                }]
-            }],
-            "generationConfig": {
-                "maxOutputTokens": 10,
-                "temperature": 0
-            }
+            "contents": [{"parts": [{"text": f"{AI_PROMPT}\n\nПост:\n{text[:500]}"}]}],
+            "generationConfig": {"maxOutputTokens": 10, "temperature": 0}
         }
         async with httpx.AsyncClient(timeout=10) as client:
             response = await client.post(url, json=payload)
             data = response.json()
             answer = data["candidates"][0]["content"]["parts"][0]["text"].strip().upper()
-            logging.info(f"Gemini відповідь: {answer}")
+            logging.info(f"Gemini: {answer}")
             return "ТАК" in answer or "TAK" in answer or "YES" in answer
     except Exception as e:
         logging.error(f"Помилка Gemini: {e}")
@@ -8019,6 +8014,9 @@ user_client = TelegramClient(
     auto_reconnect=True,
 )
 bot_client = TelegramClient('bot', API_ID, API_HASH)
+
+# Черга повідомлень — жоден пост не загубиться
+message_queue = asyncio.Queue()
 
 async def send_to_me(event, keyword, channel_name, channel_username):
     text = event.message.text or event.message.caption or ''
@@ -8037,6 +8035,10 @@ async def send_to_me(event, keyword, channel_name, channel_username):
                 ext = '.jpg'
             elif isinstance(media, MessageMediaDocument):
                 mime = media.document.mime_type or ''
+                # Пропускаємо великі відео (більше 20МБ)
+                if hasattr(media, 'document') and media.document.size > 20 * 1024 * 1024:
+                    await bot_client.send_message(MY_CHAT_ID, caption + "\n\n📎 Відео занадто велике — дивись в оригіналі")
+                    return
                 if 'video' in mime:
                     ext = '.mp4'
                 elif 'gif' in mime:
@@ -8057,6 +8059,38 @@ async def send_to_me(event, keyword, channel_name, channel_username):
 
     await bot_client.send_message(MY_CHAT_ID, caption)
 
+# Обробник черги — обробляє пости по одному
+async def queue_worker():
+    logging.info("Черга запущена")
+    while True:
+        try:
+            event, keyword = await message_queue.get()
+            try:
+                text = event.message.text or event.message.caption or ''
+
+                logging.info(f"Знайдено: {keyword}. Перевіряю через Gemini...")
+                is_relevant = await check_with_gemini(text)
+
+                if not is_relevant:
+                    logging.info(f"Gemini відхилив — не про наш район")
+                    continue
+
+                channel = await event.get_chat()
+                channel_name = getattr(channel, 'title', 'Невідомий канал')
+                channel_username = getattr(channel, 'username', '')
+
+                logging.info(f"✅ Надсилаю з {channel_name}")
+                await send_to_me(event, keyword, channel_name, channel_username)
+
+            except Exception as e:
+                logging.error(f"Помилка обробки посту: {e}")
+            finally:
+                message_queue.task_done()
+
+        except Exception as e:
+            logging.error(f"Помилка черги: {e}")
+            await asyncio.sleep(1)
+
 @user_client.on(events.NewMessage(chats=CHANNELS))
 async def handler(event):
     try:
@@ -8066,40 +8100,29 @@ async def handler(event):
         if not text_lower.strip():
             return
 
-        found_keyword = None
         for keyword in KEYWORDS:
             if keyword.lower() in text_lower:
-                found_keyword = keyword
+                # Додаємо в чергу — не блокуємо основний потік
+                await message_queue.put((event, keyword))
+                logging.info(f"В черзі: {message_queue.qsize()} постів")
                 break
 
-        if not found_keyword:
-            return
-
-        logging.info(f"Знайдено: {found_keyword}. Перевіряю через Gemini...")
-        is_relevant = await check_with_gemini(text)
-
-        if not is_relevant:
-            logging.info(f"Gemini відхилив — не про наш район")
-            return
-
-        channel = await event.get_chat()
-        channel_name = getattr(channel, 'title', 'Невідомий канал')
-        channel_username = getattr(channel, 'username', '')
-
-        logging.info(f"✅ Gemini підтвердив! Надсилаю з {channel_name}")
-        await send_to_me(event, found_keyword, channel_name, channel_username)
-
     except Exception as e:
-        logging.error(f"Помилка: {e}")
+        logging.error(f"Помилка хендлера: {e}")
 
 async def main():
     await user_client.start()
     await bot_client.start(bot_token=BOT_TOKEN)
+
     print("✅ Бот запущен з Gemini AI фільтром!")
     print(f"📋 Слежу за {len(CHANNELS)} каналами")
     print(f"🔍 Мониторю {len(KEYWORDS)} ключевых слов")
     print("🤖 Gemini фільтр активний!")
+    print("📬 Черга повідомлень активна!")
     print("👀 Слежу за каналами...")
+
+    # Запускаємо обробник черги паралельно
+    asyncio.create_task(queue_worker())
 
     while True:
         try:
