@@ -3,6 +3,7 @@ import asyncio
 import io
 import logging
 import httpx
+from aiohttp import web
 from telethon import TelegramClient, events
 from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
 
@@ -8110,6 +8111,20 @@ async def handler(event):
     except Exception as e:
         logging.error(f"Помилка хендлера: {e}")
 
+async def health_check(request):
+    return web.Response(text="OK", status=200)
+
+async def start_health_server():
+    app = web.Application()
+    app.router.add_get('/', health_check)
+    app.router.add_get('/health', health_check)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get('PORT', 8080))
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    logging.info(f"Health check сервер запущено на порту {port}")
+
 async def main():
     await user_client.start()
     await bot_client.start(bot_token=BOT_TOKEN)
@@ -8120,6 +8135,9 @@ async def main():
     print("🤖 Gemini фільтр активний!")
     print("📬 Черга повідомлень активна!")
     print("👀 Слежу за каналами...")
+
+    # Запускаємо health check сервер для UptimeRobot
+    await start_health_server()
 
     # Запускаємо обробник черги паралельно
     asyncio.create_task(queue_worker())
